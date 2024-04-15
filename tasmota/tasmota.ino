@@ -40,6 +40,7 @@
 #endif
 
 // Libraries
+#include <WiFiHelper.h>
 #include <ESP8266HTTPClient.h>              // Ota
 #include <ESP8266httpUpdate.h>              // Ota
 #ifdef ESP32
@@ -225,7 +226,11 @@ bool tasconsole_serial = false;
 
 #if ARDUINO_USB_MODE
 //#warning **** TasConsole ARDUINO_USB_MODE ****
-//HWCDC HWCDCSerial;                        // Already defined in HWCDC.cpp
+#if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5,1,3))
+#if !ARDUINO_USB_CDC_ON_BOOT
+HWCDC HWCDCSerial;
+#endif  // ARDUINO_USB_CDC_ON_BOOT
+#endif
 TASCONSOLE TasConsole{HWCDCSerial};         // ESP32C3/C6/S3 embedded USB using JTAG interface
 //#warning **** TasConsole uses HWCDC ****
 #else   // No ARDUINO_USB_MODE
@@ -399,7 +404,6 @@ struct TasmotaGlobal_t {
   uint8_t module_type;                      // Current copy of Settings->module or user template type
   uint8_t emulated_module_type;             // Emulated module type as requested by ESP32
   uint8_t last_source;                      // Last command source
-  uint8_t last_command_source;              // Last command source
   uint8_t shutters_present;                 // Number of actual define shutters
   uint8_t discovery_counter;                // Delayed discovery counter
   uint8_t power_on_delay;                   // Delay relay power on to reduce power surge (SetOption47)
@@ -407,13 +411,7 @@ struct TasmotaGlobal_t {
   uint8_t restore_powered_off_led_counter;  // Seconds before powered-off LED (LEDLink) is restored
   uint8_t pwm_dimmer_led_bri;               // Adjusted brightness LED level
 #endif  // USE_PWM_DIMMER
-
-#ifdef MQTT_DATA_STRING
   String mqtt_data;                         // Buffer filled by Response functions
-#else
-  char mqtt_data[MESSZ];                    // MQTT publish buffer
-#endif
-
   char version[16];                         // Composed version string like 255.255.255.255
   char image_name[33];                      // Code image and/or commit
   char hostname[33];                        // Composed Wifi hostname
@@ -532,23 +530,18 @@ void setup(void) {
 
   bool is_connected_to_USB = false;
 #if SOC_USB_SERIAL_JTAG_SUPPORTED  // Not S2
-  rtc_clk_bbpll_add_consumer();    // Maybe unneeded
-  usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SOF);
-  usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SOF);
-  // First check if USB cable is connected - maybe add a new SetOption to prevent this
-  for (uint32_t i = 0; i < 1000; i++) {  // Allow the host to send at least one SOF packet, 1ms should be enough but let's be very conservative here - maybe unneeded
-      is_connected_to_USB = ((usb_serial_jtag_ll_get_intraw_mask() & USB_SERIAL_JTAG_INTR_SOF) != 0);
+  for (uint32_t i = 0; i < 5; i++) {  // wait up to 250 ms - maybe a shorter time is enough
+      is_connected_to_USB = usb_serial_jtag_is_connected();
       if (is_connected_to_USB) { break; }
-      delay(1);
+      delay(50);
   }
-  rtc_clk_bbpll_remove_consumer();
 #else
   is_connected_to_USB = true;      // S2
 #endif  // SOC_USB_SERIAL_JTAG_SUPPORTED
 
   if (is_connected_to_USB) {
     TasConsole.setRxBufferSize(INPUT_BUFFER_SIZE);
-  //  TasConsole.setTxBufferSize(INPUT_BUFFER_SIZE);
+//    TasConsole.setTxBufferSize(INPUT_BUFFER_SIZE);
     TasConsole.begin(115200);    // Will always be 115200 bps
 #if !ARDUINO_USB_MODE
     USB.begin();                 // This needs a serial console with DTR/DSR support
@@ -715,7 +708,8 @@ void setup(void) {
   }
 
   // Thehackbox inserts "release" or "commit number" before compiling using sed -i -e 's/PSTR("(%s)")/PSTR("(85cff52-%s)")/g' tasmota.ino
-  snprintf_P(TasmotaGlobal.image_name, sizeof(TasmotaGlobal.image_name), PSTR("(%s)"), PSTR(CODE_IMAGE_STR));  // Results in (85cff52-tasmota) or (release-tasmota)
+  // Github inserts "release" or "commit number" before compiling using sed -i -e 's/TASMOTA_SHA_SHORT/TASMOTA_SHA_SHORT 85cff52-/g' tasmota_version.h
+  snprintf_P(TasmotaGlobal.image_name, sizeof(TasmotaGlobal.image_name), PSTR("(" STR(TASMOTA_SHA_SHORT) "%s)"), PSTR(CODE_IMAGE_STR));  // Results in (85cff52-tasmota) or (release-tasmota)
 
   Format(TasmotaGlobal.mqtt_client, SettingsText(SET_MQTT_CLIENT), sizeof(TasmotaGlobal.mqtt_client));
   Format(TasmotaGlobal.mqtt_topic, SettingsText(SET_MQTT_TOPIC), sizeof(TasmotaGlobal.mqtt_topic));
