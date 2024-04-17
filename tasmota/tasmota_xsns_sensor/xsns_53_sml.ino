@@ -533,9 +533,16 @@ struct METER_DESC {
 #ifdef ESP32
   int8_t uart_index;
 #endif
+  int8_t led_pin;
+  int8_t led_state;
+  int8_t led_digit;
+  int8_t led_blink;
+  uint16_t led_wait;
+  char   led_pin_str[4];
+  int8_t led_on;
+  uint8_t led_val_on;
+  uint8_t led_val_off;
 };
-
-
 
 #define TCP_MODE_FLG 0x7f
 
@@ -1615,6 +1622,67 @@ void sml_shift_in(uint32_t meters, uint32_t shard) {
   }
 }
 
+enum {
+	LED_INIT = 1, LED_DIGIT, LED_WAIT, LED_KEEP_ALIVE
+};
+
+#define TIME_BLINK_ON	(200 / 50)
+#define TIME_BLINK_OFF	(200 / 50)
+#define TIME_DIGIT_WAIT	(3000 / 50)
+#define TIME_KEEP_ALIVE	(30000 / 50)
+
+static void LED_state_machine(struct METER_DESC *mp)
+{
+	int8_t lpin = mp->led_pin;
+
+	if (mp->led_wait) {
+		mp->led_wait--;
+		return;
+	}
+	if (mp->led_blink) {
+		if (mp->led_on) {
+			digitalWrite(lpin, mp->led_val_off);
+			mp->led_on = 0;
+			mp->led_wait = TIME_BLINK_OFF;
+			mp->led_blink--;
+		} else {
+			digitalWrite(lpin, mp->led_val_on);
+			mp->led_on = 1;
+			mp->led_wait = TIME_BLINK_ON;
+		}
+		return;
+	}
+
+	switch (mp->led_state) {
+		case LED_INIT:
+			pinMode(lpin, OUTPUT);
+			digitalWrite(lpin, mp->led_val_off);
+			mp->led_state = LED_DIGIT;
+			mp->led_digit = 0;
+			mp->led_blink = 1;
+			mp->led_wait = 0;
+			mp->led_on = 0;
+			break;
+		case LED_DIGIT:
+			mp->led_blink = mp->led_pin_str[mp->led_digit] - '0';
+			mp->led_digit++;
+			mp->led_state = LED_WAIT;
+			break;
+		case LED_WAIT:
+			if (mp->led_digit < 4) {
+				mp->led_wait = TIME_DIGIT_WAIT;
+				mp->led_state = LED_DIGIT;
+			} else {
+				mp->led_wait = TIME_KEEP_ALIVE;
+				mp->led_state = LED_KEEP_ALIVE;
+			}
+			break;
+		case LED_KEEP_ALIVE:
+			mp->led_blink = 1;
+			mp->led_state = LED_WAIT;
+			break;
+	}
+}
 
 uint16_t sml_count = 0;
 
@@ -1645,6 +1713,8 @@ uint32_t meters;
 #endif
         }
       }
+      if (mp->led_pin != -1)
+        LED_state_machine(mp);
     }
 }
 
@@ -3212,7 +3282,30 @@ dddef_exit:
             }
            mmp->prefix[cnt] = *lp++;
           }
-          if (*lp == ',') {
+          if (*lp == ',' && *(lp + 1) == 'l') {
+            lp += 2;
+            // get LED pin
+            if (*lp == 'i') {
+              lp++;
+              mmp->led_val_on = LOW;
+              mmp->led_val_off = HIGH;
+            } else {
+              mmp->led_val_on = HIGH;
+              mmp->led_val_off = LOW;
+            }
+            mmp->led_pin = strtol(lp, &lp, 10);
+            if (Gpio_used(mmp->led_pin)) {
+              AddLog(LOG_LEVEL_INFO, PSTR("SML: Error: Duplicate GPIO %d defined. Not usable for LED in meter number %d"), meter_desc[index].led_pin, index + 1);
+              goto dddef_exit;
+            }
+	    if (*lp != ',') goto dddef_exit;
+	    lp++;
+            mmp->led_pin_str[0] = *lp++;
+            mmp->led_pin_str[1] = *lp++;
+            mmp->led_pin_str[2] = *lp++;
+            mmp->led_pin_str[3] = *lp++;
+            mmp->led_state = LED_INIT;
+          } else if (*lp == ',') {
             lp++;
             // get TRX pin
             mmp->trxpin = strtol(lp, &lp, 10);
